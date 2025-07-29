@@ -1,0 +1,205 @@
+# MLOps OCR Demo - Docker Compose Configuration
+# Orchestrates the complete MLOps pipeline with multiple services
+
+version: '3.8'
+
+services:
+  # Main OCR Demo Application
+  ocr-demo-app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: ocr-demo-app
+    ports:
+      - "7860:7860"
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/google-credentials.json
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./credentials:/app/credentials:ro
+    depends_on:
+      - mlflow
+      - postgres
+    networks:
+      - mlops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # MLflow for Model Registry and Experiment Tracking
+  mlflow:
+    image: python:3.9-slim
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=sqlite:///mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow-data:/mlflow
+      - ./mlflow:/mlflow
+    working_dir: /mlflow
+    command: >
+      bash -c "pip install mlflow &&
+               mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow/artifacts"
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # PostgreSQL for MLflow backend (alternative to SQLite)
+  postgres:
+    image: postgres:13
+    container_name: mlops-postgres
+    environment:
+      - POSTGRES_DB=mlflow
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=mlflow_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # Redis for caching and job queues
+  redis:
+    image: redis:6-alpine
+    container_name: mlops-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: mlops-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mlops-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mlops-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - mlops-network
+    restart: unless-stopped
+
+  # Development service
+  ocr-demo-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: ocr-demo-dev
+    ports:
+      - "7861:7860"
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - mlflow
+    networks:
+      - mlops-network
+    profiles:
+      - development
+    command: ["python", "gradio_app.py"]
+
+  # Testing service
+  ocr-demo-test:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: testing
+    container_name: ocr-demo-test
+    environment:
+      - ENVIRONMENT=testing
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app
+    networks:
+      - mlops-network
+    profiles:
+      - testing
+    command: ["pytest", "tests/", "-v", "--cov=src", "--cov-report=html"]
+
+# Named volumes for persistent data
+volumes:
+  mlflow-data:
+    driver: local
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  minio-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# Custom network for service communication
+networks:
+  mlops-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 
